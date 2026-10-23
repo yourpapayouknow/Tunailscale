@@ -1,5 +1,6 @@
 #!/bin/zsh
 set -e
+set -o pipefail
 
 # 构建独立视觉测试 App，不签特权权限或启动真实后台
 ts_ui_root="${PWD}/build/ui-audit"
@@ -26,7 +27,8 @@ cp src/app/icons/*.png "${ts_ui_app}/"
 codesign -s - --force "$ts_ui_app"
 xcrun simctl bootstatus "$ts_ui_device" -b
 xcrun simctl install "$ts_ui_device" "$ts_ui_app"
-xcrun simctl launch --console --terminate-running-process "$ts_ui_device" com.utunailscale.ui-audit
+xcrun simctl launch --console --terminate-running-process "$ts_ui_device" com.utunailscale.ui-audit 2>&1 | tee "${ts_ui_root}/run.log"
+grep -Fq 'UIAudit complete:' "${ts_ui_root}/run.log"
 ts_ui_data=$(xcrun simctl get_app_container "$ts_ui_device" com.utunailscale.ui-audit data)
 mkdir -p "${ts_ui_root}/screenshots"
 cp "${ts_ui_data}/Documents/"*.png "${ts_ui_root}/screenshots/"

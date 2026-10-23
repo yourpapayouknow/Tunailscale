@@ -28,6 +28,8 @@ Tunailscale面向已安装TrollStore的iPhone与iPad用户，通过原生utun接
 
 ## 传统开始
 
+从[最新正式版](https://github.com/yourpapayouknow/Tunailscale/releases/latest)下载`Tunailscale.tipa`，通过TrollStore安装。
+
 应用最低部署目标为iOS/iPadOS15.0，设备必须处于TrollStore支持的系统版本且已安装TrollStore；不能通过普通侧载工具替代其特权安装。
 
 源码构建使用macOS、Xcode16.3及其iOS SDK、Homebrew、Git和Go。脚本为本项目固定Go1.27.3及Tailscale源码提交，不修改其他检出或全局Go配置。首次构建需要联网获取工具链及依赖，并须先打开Xcode完成许可确认。
