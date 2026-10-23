@@ -43,13 +43,6 @@ final class UIAudit: UIResponder, UIApplicationDelegate {
         let socket = class_getClassMethod(TSLocalAPI.self, #selector(TSLocalAPI.defaultSocketPath))!
         method_setImplementation(socket, imp_implementationWithBlock({ () -> NSString in "/tmp/ui-audit-disconnected.sock" } as @convention(block) () -> NSString))
         let connected = model(connected: true), stopped = model(connected: false)
-        // 只在隔离模拟器核验真实系统剪贴板，完成后还原全部内容
-        let previousClipboard = UIPasteboard.general.items
-        for address in ["100.64.0.10", "fd7a:115c:a1e0::1234"] {
-            TSIPText.copy(address)
-            precondition(UIPasteboard.general.string == address, "IP copy changed address")
-        }
-        UIPasteboard.general.items = previousClipboard
         let many = model(connected: true)
         many.peers = (0..<30).reversed().map { index in
             let peer = TSTailscalePeer()
@@ -111,6 +104,18 @@ final class UIAudit: UIResponder, UIApplicationDelegate {
         window?.rootViewController = controller
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             guard let window = self.window else { exit(1) }
+            // 首帧后检查剪贴板，避开UIKit启动期的键盘连接并还原全部内容
+            if self.index == 0 {
+                let previousClipboard = UIPasteboard.general.items
+                var copied = true
+                for address in ["100.64.0.10", "fd7a:115c:a1e0::1234"] {
+                    TSIPText.copy(address)
+                    copied = copied && UIPasteboard.general.string == address
+                }
+                UIPasteboard.general.items = previousClipboard
+                precondition(copied, "IP copy changed address")
+                NSLog("PASS: complete IPv4/IPv6 clipboard check after launch")
+            }
             window.layoutIfNeeded()
             if name.hasPrefix("home-many-bottom") {
                 guard let scroll = self.scroll(in: window) else { preconditionFailure("Missing peer scroll view") }
