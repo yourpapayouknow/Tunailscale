@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+assert '* text=auto eol=lf' in (ROOT / ".gitattributes").read_text(encoding="utf-8")
 bundle = "com.iwmei.tunailscale"
 group = f"group.{bundle}"
 app = plistlib.loads((ROOT / "src/app/Info.plist").read_bytes())
