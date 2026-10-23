@@ -1,0 +1,22 @@
+diff --git a/net/dns/manager_darwin.go b/net/dns/manager_darwin.go
+index a93a131..c0a4c5b 100644
+--- a/net/dns/manager_darwin.go
++++ b/net/dns/manager_darwin.go
+@@ -9,6 +9,7 @@ import (
+ 	"io/fs"
+ 	"os"
+ 	"os/exec"
++	"runtime"
+ 	"strconv"
+ 	"strings"
+ 
+@@ -189,6 +190,9 @@ func (c *darwinConfigurator) runScutilScript(script string) (string, error) {
+ }
+ 
+ func runScutil(script string) (string, error) {
++	if runtime.GOOS == "ios" {
++		return "", nil
++	}
+ 	cmd := exec.Command("/usr/sbin/scutil")
+ 	cmd.Stdin = strings.NewReader(script)
+ 	out, err := cmd.CombinedOutput()

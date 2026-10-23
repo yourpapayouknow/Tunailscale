@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- 原版九点坐标与留白，保留本项目配色。 -->
+  <rect width="512" height="512" fill="#111213"/>
+  <circle cx="128" cy="128" r="42.6666666667" fill="#374151"/>
+  <circle cx="256" cy="128" r="42.6666666667" fill="#14B8A6"/>
+  <circle cx="384" cy="128" r="42.6666666667" fill="#374151"/>
+  <circle cx="128" cy="256" r="42.6666666667" fill="#14B8A6"/>
+  <circle cx="256" cy="256" r="42.6666666667" fill="#14B8A6"/>
+  <circle cx="384" cy="256" r="42.6666666667" fill="#14B8A6"/>
+  <circle cx="128" cy="384" r="42.6666666667" fill="#374151"/>
+  <circle cx="256" cy="384" r="42.6666666667" fill="#14B8A6"/>
+  <circle cx="384" cy="384" r="42.6666666667" fill="#374151"/>
+</svg>

@@ -1,0 +1,387 @@
+diff --git a/wgengine/router/osrouter/router_userspace_bsd.go b/wgengine/router/osrouter/router_userspace_bsd.go
+index 88eda4c..08f1f3b 100644
+--- a/wgengine/router/osrouter/router_userspace_bsd.go
++++ b/wgengine/router/osrouter/router_userspace_bsd.go
+@@ -6,14 +6,19 @@
+ package osrouter
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"log"
++	"net"
+ 	"net/netip"
++	"os"
+ 	"os/exec"
+ 	"runtime"
+ 
+ 	"github.com/tailscale/wireguard-go/tun"
+ 	"go4.org/netipx"
++	"golang.org/x/net/route"
++	"golang.org/x/sys/unix"
+ 	"tailscale.com/health"
+ 	"tailscale.com/net/netmon"
+ 	"tailscale.com/net/tsaddr"
+@@ -85,6 +90,9 @@ func cmd(args ...string) *exec.Cmd {
+ }
+ 
+ func (r *userspaceBSDRouter) Up() error {
++	if runtime.GOOS == "ios" {
++		return iosIfUp(r.tunname)
++	}
+ 	ifup := []string{"ifconfig", r.tunname, "up"}
+ 	if out, err := cmd(ifup...).CombinedOutput(); err != nil {
+ 		r.logf("running ifconfig failed: %v\n%s", err, out)
+@@ -93,6 +101,57 @@ func (r *userspaceBSDRouter) Up() error {
+ 	return nil
+ }
+ 
++// setIOSRoute updates one kernel route without relying on the absent iOS route binary.
++func (r *userspaceBSDRouter) setIOSRoute(prefix netip.Prefix, messageType int) error {
++	ifc, err := net.InterfaceByName(r.tunname)
++	if err != nil {
++		return fmt.Errorf("looking up interface %q: %w", r.tunname, err)
++	}
++
++	prefix = prefix.Masked()
++	var dst, mask route.Addr
++	if prefix.Addr().Is4() {
++		dst = &route.Inet4Addr{IP: prefix.Addr().As4()}
++		var mask4 [4]byte
++		copy(mask4[:], net.CIDRMask(prefix.Bits(), 32))
++		mask = &route.Inet4Addr{IP: mask4}
++	} else {
++		dst = &route.Inet6Addr{IP: prefix.Addr().As16()}
++		var mask6 [16]byte
++		copy(mask6[:], net.CIDRMask(prefix.Bits(), 128))
++		mask = &route.Inet6Addr{IP: mask6}
++	}
++
++	fd, err := unix.Socket(unix.AF_ROUTE, unix.SOCK_RAW, unix.AF_UNSPEC)
++	if err != nil {
++		return fmt.Errorf("creating route socket: %w", err)
++	}
++	defer unix.Close(fd)
++
++	msg := route.RouteMessage{
++		Version: 0x5,
++		Type:    messageType,
++		Flags:   unix.RTF_UP | unix.RTF_STATIC,
++		ID:      uintptr(os.Getpid()),
++		Seq:     1,
++		Addrs: []route.Addr{
++			unix.RTAX_DST:     dst,
++			unix.RTAX_GATEWAY: &route.LinkAddr{Index: ifc.Index},
++			unix.RTAX_NETMASK: mask,
++		},
++	}
++	b, err := msg.Marshal()
++	if err != nil {
++		return fmt.Errorf("marshaling route message: %w", err)
++	}
++	_, err = unix.Write(fd, b)
++	if (messageType == unix.RTM_ADD && errors.Is(err, unix.EEXIST)) ||
++		(messageType == unix.RTM_DELETE && errors.Is(err, unix.ESRCH)) {
++		return nil
++	}
++	return err
++}
++
+ func inet(p netip.Prefix) string {
+ 	if p.Addr().Is6() {
+ 		return "inet6"
+@@ -118,6 +177,13 @@ func (r *userspaceBSDRouter) Set(cfg *router.Config) (reterr error) {
+ 
+ 	// Update the addresses.
+ 	for _, addr := range addrsToRemove {
++		if runtime.GOOS == "ios" {
++			if err := iosSetAddr(r.tunname, addr, true); err != nil {
++				r.logf("addr del failed: %v: %v", addr, err)
++				setErr(err)
++			}
++			continue
++		}
+ 		arg := []string{"ifconfig", r.tunname, inet(addr), addr.String(), "-alias"}
+ 		out, err := cmd(arg...).CombinedOutput()
+ 		if err != nil {
+@@ -126,6 +192,13 @@ func (r *userspaceBSDRouter) Set(cfg *router.Config) (reterr error) {
+ 		}
+ 	}
+ 	for _, addr := range r.addrsToAdd(cfg.LocalAddrs) {
++		if runtime.GOOS == "ios" {
++			if err := iosSetAddr(r.tunname, addr, false); err != nil {
++				r.logf("addr add failed: %v: %v", addr, err)
++				setErr(err)
++			}
++			continue
++		}
+ 		var arg []string
+ 		if runtime.GOOS == "freebsd" && addr.Addr().Is6() && addr.Bits() == 128 {
+ 			// FreeBSD rejects tun addresses of the form fc00::1/128 -> fc00::1,
+@@ -146,7 +219,7 @@ func (r *userspaceBSDRouter) Set(cfg *router.Config) (reterr error) {
+ 
+ 	newRoutes := make(map[netip.Prefix]bool)
+ 	for _, route := range cfg.Routes {
+-		if runtime.GOOS != "darwin" && route == tsaddr.TailscaleULARange() {
++		if runtime.GOOS == "freebsd" && route == tsaddr.TailscaleULARange() {
+ 			// Because we added the interface address as a /48 above,
+ 			// the kernel already created the Tailscale ULA route
+ 			// implicitly. We mustn't try to add/delete it ourselves.
+@@ -157,6 +230,13 @@ func (r *userspaceBSDRouter) Set(cfg *router.Config) (reterr error) {
+ 	// Delete any preexisting routes.
+ 	for route := range r.routes {
+ 		if resetRoutes || !newRoutes[route] {
++			if runtime.GOOS == "ios" {
++				if err := r.setIOSRoute(route, unix.RTM_DELETE); err != nil {
++					r.logf("route del failed: %v: %v", route, err)
++					setErr(err)
++				}
++				continue
++			}
+ 			net := netipx.PrefixIPNet(route)
+ 			nip := net.IP.Mask(net.Mask)
+ 			nstr := fmt.Sprintf("%v/%d", nip, route.Bits())
+@@ -177,6 +257,13 @@ func (r *userspaceBSDRouter) Set(cfg *router.Config) (reterr error) {
+ 	// Add the routes.
+ 	for route := range newRoutes {
+ 		if resetRoutes || !r.routes[route] {
++			if runtime.GOOS == "ios" {
++				if err := r.setIOSRoute(route, unix.RTM_ADD); err != nil {
++					r.logf("route add failed: %v: %v", route, err)
++					setErr(err)
++				}
++				continue
++			}
+ 			net := netipx.PrefixIPNet(route)
+ 			nip := net.IP.Mask(net.Mask)
+ 			nstr := fmt.Sprintf("%v/%d", nip, route.Bits())
+diff --git a/wgengine/router/osrouter/router_userspace_ios.go b/wgengine/router/osrouter/router_userspace_ios.go
+new file mode 100644
+--- /dev/null
++++ b/wgengine/router/osrouter/router_userspace_ios.go
+@@ -0,0 +1,202 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build ios && cgo
++
++package osrouter
++
++/*
++#include <arpa/inet.h>
++#include <errno.h>
++#include <net/if.h>
++#include <netinet/in.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++// Apple XNU bsd/netinet6/in6_var.h defines the IPv6 ioctl ABI omitted by the iOS SDK.
++// https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet6/in6_var.h
++struct ts_in6_lifetime {
++	time_t expire;
++	time_t preferred;
++	uint32_t valid;
++	uint32_t preferred_lifetime;
++};
++
++struct ts_in6_aliasreq {
++	char name[IFNAMSIZ];
++	struct sockaddr_in6 addr;
++	struct sockaddr_in6 dst;
++	struct sockaddr_in6 mask;
++	int flags;
++	struct ts_in6_lifetime lifetime;
++};
++
++struct ts_in6_ifreq {
++	char name[IFNAMSIZ];
++	union {
++		struct sockaddr_in6 addr;
++		uint64_t reserved[34];
++	} value;
++};
++
++_Static_assert(sizeof(struct ts_in6_aliasreq) == 128, "unexpected Darwin in6_aliasreq size");
++_Static_assert(sizeof(struct ts_in6_ifreq) == 288, "unexpected Darwin in6_ifreq size");
++
++#define TS_SIOCAIFADDR_IN6 _IOW('i', 26, struct ts_in6_aliasreq)
++#define TS_SIOCDIFADDR_IN6 _IOW('i', 25, struct ts_in6_ifreq)
++
++// ts_name validates and copies an interface name.
++static int ts_name(char *dst, const char *src) {
++	if (strlcpy(dst, src, IFNAMSIZ) >= IFNAMSIZ) {
++		return ENAMETOOLONG;
++	}
++	return 0;
++}
++
++// ts_done closes an ioctl socket without losing its error.
++static int ts_done(int fd, int err) {
++	close(fd);
++	return err;
++}
++
++// ts_if_up marks an interface administratively up.
++static int ts_if_up(const char *name) {
++	int fd = socket(AF_INET, SOCK_DGRAM, 0);
++	if (fd < 0) {
++		return errno;
++	}
++
++	struct ifreq req;
++	memset(&req, 0, sizeof(req));
++	int err = ts_name(req.ifr_name, name);
++	if (err != 0) {
++		return ts_done(fd, err);
++	}
++	if (ioctl(fd, SIOCGIFFLAGS, &req) < 0) {
++		return ts_done(fd, errno);
++	}
++	req.ifr_flags |= IFF_UP;
++	if (ioctl(fd, SIOCSIFFLAGS, &req) < 0) {
++		return ts_done(fd, errno);
++	}
++	return ts_done(fd, 0);
++}
++
++// ts_mask4 fills an IPv4 prefix mask.
++static void ts_mask4(struct sockaddr_in *mask, int bits) {
++	mask->sin_len = sizeof(*mask);
++	mask->sin_family = AF_INET;
++	mask->sin_addr.s_addr = bits == 0 ? 0 : htonl(UINT32_MAX << (32 - bits));
++}
++
++// ts_mask6 fills an IPv6 prefix mask.
++static void ts_mask6(struct sockaddr_in6 *mask, int bits) {
++	mask->sin6_len = sizeof(*mask);
++	mask->sin6_family = AF_INET6;
++	for (int i = 0; i < 16 && bits > 0; i++) {
++		if (bits >= 8) {
++			mask->sin6_addr.s6_addr[i] = 0xff;
++			bits -= 8;
++		} else {
++			mask->sin6_addr.s6_addr[i] = (uint8_t)(0xff << (8 - bits));
++			bits = 0;
++		}
++	}
++}
++
++// ts_addr updates one address using the matching native ioctl family.
++static int ts_addr(const char *name, const char *address, int bits, int ipv6, int remove) {
++	if (bits < 0 || bits > (ipv6 ? 128 : 32)) {
++		return EINVAL;
++	}
++	int family = ipv6 ? AF_INET6 : AF_INET;
++	int fd = socket(family, SOCK_DGRAM, 0);
++	if (fd < 0) {
++		return errno;
++	}
++
++	union {
++		struct ifaliasreq v4;
++		struct ts_in6_aliasreq v6;
++		struct ts_in6_ifreq del6;
++	} req;
++	memset(&req, 0, sizeof(req));
++	int err = ts_name(req.v4.ifra_name, name);
++	if (err != 0) {
++		return ts_done(fd, err);
++	}
++	unsigned long op;
++	if (ipv6) {
++		req.v6.addr.sin6_len = sizeof(req.v6.addr);
++		req.v6.addr.sin6_family = family;
++		if (inet_pton(family, address, &req.v6.addr.sin6_addr) != 1) {
++			return ts_done(fd, EINVAL);
++		}
++		memcpy(&req.v6.dst, &req.v6.addr, sizeof(req.v6.addr));
++		ts_mask6(&req.v6.mask, bits);
++		req.v6.lifetime.valid = UINT32_MAX;
++		req.v6.lifetime.preferred_lifetime = UINT32_MAX;
++		op = remove ? TS_SIOCDIFADDR_IN6 : TS_SIOCAIFADDR_IN6;
++	} else {
++		struct sockaddr_in *addr = (struct sockaddr_in *)&req.v4.ifra_addr;
++		addr->sin_len = sizeof(*addr);
++		addr->sin_family = family;
++		if (inet_pton(family, address, &addr->sin_addr) != 1) {
++			return ts_done(fd, EINVAL);
++		}
++		memcpy(&req.v4.ifra_broadaddr, addr, sizeof(*addr));
++		ts_mask4((struct sockaddr_in *)&req.v4.ifra_mask, bits);
++		op = remove ? SIOCDIFADDR : SIOCAIFADDR;
++	}
++	if (ioctl(fd, op, &req) < 0) {
++		err = errno;
++		if ((remove && err == EADDRNOTAVAIL) || (!remove && err == EEXIST)) {
++			err = 0;
++		}
++	}
++	return ts_done(fd, err);
++}
++*/
++import "C"
++
++import (
++	"fmt"
++	"net/netip"
++	"syscall"
++	"unsafe"
++)
++
++// iosIfUp brings an iOS interface online without spawning ifconfig.
++func iosIfUp(name string) error {
++	cname := C.CString(name)
++	defer C.free(unsafe.Pointer(cname))
++	if errno := C.ts_if_up(cname); errno != 0 {
++		return fmt.Errorf("bringing interface %q up: %w", name, syscall.Errno(errno))
++	}
++	return nil
++}
++
++// iosSetAddr updates one iOS interface address without spawning ifconfig.
++func iosSetAddr(name string, prefix netip.Prefix, remove bool) error {
++	cname := C.CString(name)
++	defer C.free(unsafe.Pointer(cname))
++	caddr := C.CString(prefix.Addr().String())
++	defer C.free(unsafe.Pointer(caddr))
++
++	ipv6 := 0
++	if prefix.Addr().Is6() {
++		ipv6 = 1
++	}
++	del := 0
++	if remove {
++		del = 1
++	}
++	if errno := C.ts_addr(cname, caddr, C.int(prefix.Bits()), C.int(ipv6), C.int(del)); errno != 0 {
++		return fmt.Errorf("updating interface %q address %v: %w", name, prefix, syscall.Errno(errno))
++	}
++	return nil
++}
+diff --git a/wgengine/router/osrouter/router_userspace_notios.go b/wgengine/router/osrouter/router_userspace_notios.go
+new file mode 100644
+--- /dev/null
++++ b/wgengine/router/osrouter/router_userspace_notios.go
+@@ -0,0 +1,18 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build (darwin || freebsd) && (!ios || !cgo)
++
++package osrouter
++
++import "net/netip"
++
++// iosIfUp rejects an unreachable non-iOS call.
++func iosIfUp(string) error {
++	panic("iosIfUp called outside an iOS cgo build")
++}
++
++// iosSetAddr rejects an unreachable non-iOS call.
++func iosSetAddr(string, netip.Prefix, bool) error {
++	panic("iosSetAddr called outside an iOS cgo build")
++}
